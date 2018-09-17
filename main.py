@@ -6,13 +6,13 @@ import argparse
 tcp_buffer_size = 2048
 max_maintenance_command_size = tcp_buffer_size
 log = logging.getLogger(__name__)
-queues = set()
+flush_to = asyncio.Future()
 servers = set()
 
 
 def main():
     arg_parser = argparse.ArgumentParser()
-    arg_parser.add_argument('--log-level', default='WARNING')
+    arg_parser.add_argument('--log-level', default='INFO')
     args = arg_parser.parse_args()
 
     logging.basicConfig(format='%(levelname)s: %(message)s', level=args.log_level)
@@ -30,12 +30,16 @@ def main():
     loop.close()
 
 
-async def handle_client(local_reader, local_writer):
-    q = asyncio.Queue()
-    queues.add(q)
+def finish_serving():
+    for server in servers:
+        server.close()
+    log.info('Not accepting new requests')
+    log.info('Waiting for buffered connections to close')
 
+
+async def handle_client(local_reader, local_writer):
     try:
-        host, port = await q.get()
+        host, port = await flush_to
         remote_reader, remote_writer = await asyncio.open_connection(host, port)
         pipe1 = pipe(local_reader, remote_writer)
         pipe2 = pipe(remote_reader, local_writer)
@@ -59,15 +63,10 @@ class MyArgParser(argparse.ArgumentParser):
 
 async def handle_maintenance_client(reader, writer):
     try:
-        data = b''
+        argv = shlex.split(await read_command(reader))
 
-        while not reader.at_eof():
-            if len(data) >= max_maintenance_command_size:
-                raise Exception(f'Maintenance command starting with "{data}" is too long')
-            data += await reader.read(tcp_buffer_size)
-
-        argv = shlex.split(data.strip().decode())
         parser = MyArgParser(prog='')
+
         subparsers = parser.add_subparsers(dest='command')
         flush_parser = subparsers.add_parser('flush')
         flush_parser.add_argument('host')
@@ -75,18 +74,30 @@ async def handle_maintenance_client(reader, writer):
 
         args = vars(parser.parse_args(argv))
         await globals()['handle_command_' + args.pop('command')](**args)
+
         writer.write(b'OK\n')
+
+    except Exception:
+        writer.write(b'Error\n')
 
     finally:
         writer.close()
 
 
 async def handle_command_flush(host, port):
-    for queue in queues:
-        queue.put_nowait((host, port))
-    for server in servers:
-        server.close()
+    finish_serving()
+    flush_to.set_result((host, port))
 
+
+async def read_command(reader):
+    data = b''
+
+    while not reader.at_eof():
+        if len(data) >= max_maintenance_command_size:
+            raise Exception(f'Maintenance command starting with "{data}" is too long')
+        data += await reader.read(tcp_buffer_size)
+
+    return data.strip().decode()
 
 if __name__ == '__main__':
     main()
