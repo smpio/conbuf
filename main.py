@@ -27,20 +27,28 @@ def main():
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument('--log-level', default='INFO')
     arg_parser.add_argument('--port', type=int, default=8888)
-    arg_parser.add_argument('--maintenance-port', type=int, default=8889)
+    arg_parser.add_argument('--maintenance-port', type=int, default=None)
+    arg_parser.add_argument('--maintenance-unix-path', default=None)
     args = arg_parser.parse_args()
 
     logging.basicConfig(format='%(levelname)s: %(message)s', level=args.log_level)
 
     loop = asyncio.get_event_loop()
-    server = loop.run_until_complete(asyncio.start_server(handle_client, port=args.port))
-    maintenance_server = loop.run_until_complete(asyncio.start_server(handle_maintenance_client,
-                                                                      port=args.maintenance_port))
-    servers.add(server)
-    servers.add(maintenance_server)
 
+    server = loop.run_until_complete(asyncio.start_server(handle_client, port=args.port))
     log.info('Serving on %s', format_sockname(server.sockets[0].getsockname()))
-    log.info('Serving maintenance on %s', format_sockname(maintenance_server.sockets[0].getsockname()))
+    servers.add(server)
+
+    if args.maintenance_port:
+        server = loop.run_until_complete(asyncio.start_server(handle_maintenance_client, port=args.maintenance_port))
+        servers.add(server)
+        log.info('Serving maintenance on %s', format_sockname(server.sockets[0].getsockname()))
+
+    if args.maintenance_unix_path:
+        path = args.maintenance_unix_path
+        server = loop.run_until_complete(asyncio.start_unix_server(handle_maintenance_client, path))
+        servers.add(server)
+        log.info('Serving maintenance on %s', path)
 
     try:
         loop.run_until_complete(asyncio.gather(*(s.wait_closed() for s in servers)))
