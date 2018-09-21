@@ -37,7 +37,11 @@ def main():
     log.info('Serving on %s', format_sockname(server.sockets[0].getsockname()))
     log.info('Serving maintenance on %s', format_sockname(maintenance_server.sockets[0].getsockname()))
 
-    loop.run_until_complete(asyncio.gather(*(s.wait_closed() for s in servers)))
+    try:
+        loop.run_until_complete(asyncio.gather(*(s.wait_closed() for s in servers)))
+    except KeyboardInterrupt:
+        pass
+
     loop.close()
     print_stats()
 
@@ -140,7 +144,8 @@ def print_stats():
     total = len(connections)
     completed = sum(1 for c in connections if c.completed_at)
     log.info('Total of %s connections were buffered', total)
-    log.info('%s(%s%%) were successfully flushed', completed, int(completed / total * 100))
+    if total:
+        log.info('%s(%s%%) were successfully flushed', completed, int(completed / total * 100))
 
     time_in_buffer = [(c.forwarded_at - c.opened_at).total_seconds() for c in connections if c.forwarded_at]
     if time_in_buffer:
