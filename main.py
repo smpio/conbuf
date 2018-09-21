@@ -24,13 +24,16 @@ class Connection:
 def main():
     arg_parser = argparse.ArgumentParser()
     arg_parser.add_argument('--log-level', default='INFO')
+    arg_parser.add_argument('--port', type=int, default=8888)
+    arg_parser.add_argument('--maintenance-port', type=int, default=8889)
     args = arg_parser.parse_args()
 
     logging.basicConfig(format='%(levelname)s: %(message)s', level=args.log_level)
 
     loop = asyncio.get_event_loop()
-    server = loop.run_until_complete(asyncio.start_server(handle_client, '127.0.0.1', 8888))
-    maintenance_server = loop.run_until_complete(asyncio.start_server(handle_maintenance_client, '127.0.0.1', 8889))
+    server = loop.run_until_complete(asyncio.start_server(handle_client, port=args.port))
+    maintenance_server = loop.run_until_complete(asyncio.start_server(handle_maintenance_client,
+                                                                      port=args.maintenance_port))
     servers.add(server)
     servers.add(maintenance_server)
 
