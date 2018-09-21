@@ -9,7 +9,6 @@ import datetime
 log = logging.getLogger(__name__)
 
 tcp_buffer_size = 2048
-max_maintenance_command_size = tcp_buffer_size
 
 flush_to = asyncio.Future()
 servers = set()
@@ -104,30 +103,53 @@ async def pipe(reader, writer):
 
 
 class MyArgParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        self.stderr = kwargs.pop('stderr', None)
+        super().__init__(*args, **kwargs)
+
     def exit(self, status=0, message=None):
-        raise Exception(message)
+        raise ParseError(message)
+
+    def _print_message(self, message, file=None):
+        if message and self.stderr:
+            self.stderr.write(message.encode())
+
+
+class ParseError(Exception):
+    def __init__(self, message):
+        super().__init__(message)
+        self.message = message
 
 
 async def handle_maintenance_client(reader, writer):
     try:
-        argv = shlex.split(await read_command(reader))
+        while not reader.at_eof():
+            command = (await reader.readline()).strip().decode()
+            if not command:
+                continue
 
-        parser = MyArgParser(prog='')
+            parser = MyArgParser(prog='', stderr=writer)
 
-        subparsers = parser.add_subparsers(dest='command')
-        flush_parser = subparsers.add_parser('flush')
-        flush_parser.add_argument('host')
-        flush_parser.add_argument('port', type=int)
+            subparsers = parser.add_subparsers(dest='command')
+            flush_parser = subparsers.add_parser('flush')
+            flush_parser.add_argument('host')
+            flush_parser.add_argument('port', type=int)
 
-        args = vars(parser.parse_args(argv))
-        log.info('Got %s from %s', args, format_sockname(writer.get_extra_info('peername')))
+            try:
+                argv = shlex.split(command)
+                args = vars(parser.parse_args(argv))
+            except ParseError as e:
+                if e.message:
+                    writer.write(e.message.encode())
+                continue
 
-        await globals()['handle_command_' + args.pop('command')](**args)
-
-        writer.write(b'OK\n')
+            log.info('Got %s from %s', args, format_sockname(writer.get_extra_info('peername')))
+            await globals()['handle_command_' + args.pop('command')](**args)
+            writer.write(b'OK\n')
 
     except Exception:
-        writer.write(b'Error\n')
+        log.exception('Error on maintenance connection')
+        writer.write(b'Internal error\n')
 
     finally:
         writer.close()
@@ -136,17 +158,6 @@ async def handle_maintenance_client(reader, writer):
 async def handle_command_flush(host, port):
     finish_serving()
     flush_to.set_result((host, port))
-
-
-async def read_command(reader):
-    data = b''
-
-    while not reader.at_eof():
-        if len(data) >= max_maintenance_command_size:
-            raise Exception(f'Maintenance command starting with "{data}" is too long')
-        data += await reader.read(tcp_buffer_size)
-
-    return data.strip().decode()
 
 
 def format_sockname(sockname):
