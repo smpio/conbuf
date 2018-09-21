@@ -2,12 +2,23 @@ import shlex
 import logging
 import asyncio
 import argparse
+import datetime
+
+log = logging.getLogger(__name__)
 
 tcp_buffer_size = 2048
 max_maintenance_command_size = tcp_buffer_size
-log = logging.getLogger(__name__)
+
 flush_to = asyncio.Future()
 servers = set()
+connections = []
+
+
+class Connection:
+    opened_at = None
+    forwarded_at = None
+    completed_at = None
+    closed_at = None
 
 
 def main():
@@ -23,11 +34,12 @@ def main():
     servers.add(server)
     servers.add(maintenance_server)
 
-    print('Serving on {}'.format(server.sockets[0].getsockname()))
-    print('Serving maintenance on {}'.format(maintenance_server.sockets[0].getsockname()))
+    log.info('Serving on %s', format_sockname(server.sockets[0].getsockname()))
+    log.info('Serving maintenance on %s', format_sockname(maintenance_server.sockets[0].getsockname()))
 
     loop.run_until_complete(asyncio.gather(*(s.wait_closed() for s in servers)))
     loop.close()
+    print_stats()
 
 
 def finish_serving():
@@ -37,15 +49,33 @@ def finish_serving():
     log.info('Waiting for buffered connections to close')
 
 
-async def handle_client(local_reader, local_writer):
+async def handle_client(in_reader, in_writer):
+    conn = Connection()
+    conn.opened_at = datetime.datetime.now()
+    connections.append(conn)
+
+    log.info('Buffered connection from %s', format_sockname(in_writer.get_extra_info('peername')))
+
     try:
         host, port = await flush_to
-        remote_reader, remote_writer = await asyncio.open_connection(host, port)
-        pipe1 = pipe(local_reader, remote_writer)
-        pipe2 = pipe(remote_reader, local_writer)
+        out_reader, out_writer = await asyncio.open_connection(host, port)
+
+        conn.forwarded_at = datetime.datetime.now()
+        log.info('Forwarding connection from %s to %s',
+                 format_sockname(in_writer.get_extra_info('peername')),
+                 format_sockname(out_writer.get_extra_info('peername')))
+
+        pipe1 = pipe(in_reader, out_writer)
+        pipe2 = pipe(out_reader, in_writer)
         await asyncio.gather(pipe1, pipe2)
+
+        conn.completed_at = datetime.datetime.now()
+        log.info('Connection from %s to %s forwarded',
+                 format_sockname(in_writer.get_extra_info('peername')),
+                 format_sockname(out_writer.get_extra_info('peername')))
     finally:
-        local_writer.close()
+        in_writer.close()
+        conn.closed_at = datetime.datetime.now()
 
 
 async def pipe(reader, writer):
@@ -73,6 +103,8 @@ async def handle_maintenance_client(reader, writer):
         flush_parser.add_argument('port', type=int)
 
         args = vars(parser.parse_args(argv))
+        log.info('Got %s from %s', args, format_sockname(writer.get_extra_info('peername')))
+
         await globals()['handle_command_' + args.pop('command')](**args)
 
         writer.write(b'OK\n')
@@ -98,6 +130,24 @@ async def read_command(reader):
         data += await reader.read(tcp_buffer_size)
 
     return data.strip().decode()
+
+
+def format_sockname(sockname):
+    return '{}:{}'.format(*sockname)
+
+
+def print_stats():
+    total = len(connections)
+    completed = sum(1 for c in connections if c.completed_at)
+    log.info('Total of %s connections were buffered', total)
+    log.info('%s(%s%%) were successfully flushed', completed, int(completed / total * 100))
+
+    time_in_buffer = [(c.forwarded_at - c.opened_at).total_seconds() for c in connections if c.forwarded_at]
+    if time_in_buffer:
+        max_time_in_buffer = max(time_in_buffer)
+        avg_time_in_buffer = sum(time_in_buffer) / len(time_in_buffer)
+        log.info('Time being buffered: max %s s, avg %s s', int(max_time_in_buffer), int(avg_time_in_buffer))
+
 
 if __name__ == '__main__':
     main()
